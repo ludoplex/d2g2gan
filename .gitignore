@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+node_modules/
+.env
+*.log
+build/
+third_party/
+cosmocc/
+samples.tsv
+*.o
