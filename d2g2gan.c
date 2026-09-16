@@ -18,7 +18,8 @@
  * LAPACK: sgeqrf_+sorgqr_ (orthogonal init), ssyev_ (symmetric sqrt for the Frechet/2-Wasserstein metric).
  *
  * Discipline (operator directive 2026-09-14):
- *   - hot paths are branchless: elementwise kernels use arithmetic masks, fmaxf/fabsf/copysignf; no `if` in inner loops
+ *   - no explicit branches in the AUTHORED elementwise kernels: arithmetic masks, fmaxf/fabsf; no `if` in inner loops
+ *     (libm calls — tanhf/expf/log1pf/atan2f — branch internally; the claim is about this source, not the emitted code)
  *   - dynamic arena allocators: chunked bump allocator with mark/reset; persistent arena (params, Adam state),
  *     frame arena reset per training step (activations, grads)
  *   - generous asserts: ASSERT is always on (not tied to NDEBUG); every kernel checks shapes/strides/alignment/
@@ -364,11 +365,12 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--batch")) c.B = atoi(argv[i + 1]);
         else if (!strcmp(argv[i], "--hidden")) c.H = atoi(argv[i + 1]);
         else if (!strcmp(argv[i], "--lr")) c.lr = (float)atof(argv[i + 1]);
-        else if (!strcmp(argv[i], "--lambda")) c.lambda = (float)atof(argv[i + 1]);
+        else if (!strcmp(argv[i], "--lambda")) { char *e; c.lambda = strtof(argv[i + 1], &e); if (*e) { fprintf(stderr, "--lambda: not a number: %s\n", argv[i + 1]); return 2; } }
         else if (!strcmp(argv[i], "--seed")) c.seed = strtoull(argv[i + 1], NULL, 0);
         else if (!strcmp(argv[i], "--eval-every")) c.eval_every = atoi(argv[i + 1]);
         else { fprintf(stderr, "usage: %s [--steps N] [--batch B] [--hidden H] [--lr f] [--lambda f] [--seed n] [--eval-every N]\n", argv[0]); return 2; }
     }
+    if ((argc - 1) & 1) { fprintf(stderr, "%s: flag %s has no value\n", argv[0], argv[argc - 1]); return 2; }
     ASSERT(c.B >= 8 && c.Z > 0 && c.H > 0 && c.X == 2 && c.steps > 0 && c.eval_every > 0 && c.lr > 0 && c.lambda >= 0);
 
     Arena persist, frame; arena_init(&persist, 1u << 20); arena_init(&frame, 1u << 20);
@@ -403,7 +405,7 @@ int main(int argc, char **argv)
         Act ar = mlp_fwd(&frame, &Dr, xr, B);  float lDr = k_bce_logits(ar.y, dl, B, 1.0f, 1.0f);   mlp_bwd(&frame, &Dr, xr, &ar, dl, 1);
         /* accumulate grads across the three sub-batches: copy W grads after each bwd (cold path, per step) */
         float *gW1 = arena_floats(&frame, Dr.W1.n), *gb1 = arena_floats(&frame, Dr.b1.n), *gW2 = arena_floats(&frame, Dr.W2.n), *gb2 = arena_floats(&frame, Dr.b2.n);
-        memcpy(gW1, Dr.W1.g, Dr.W1.n * 4); memcpy(gb1, Dr.b1.g, Dr.b1.n * 4); memcpy(gW2, Dr.W2.g, Dr.W2.n * 4); memcpy(gb2, Dr.b2.g, Dr.b2.n * 4);
+        memcpy(gW1, Dr.W1.g, Dr.W1.n * sizeof(float)); memcpy(gb1, Dr.b1.g, Dr.b1.n * sizeof(float)); memcpy(gW2, Dr.W2.g, Dr.W2.n * sizeof(float)); memcpy(gb2, Dr.b2.g, Dr.b2.n * sizeof(float));
         Act af0 = mlp_fwd(&frame, &Dr, ag0.y, B); lDr += k_bce_logits(af0.y, dl, B, 0.0f, 0.5f) * 0.5f; mlp_bwd(&frame, &Dr, ag0.y, &af0, dl, 1);
         vadd(gW1, Dr.W1.g, Dr.W1.n); vadd(gb1, Dr.b1.g, Dr.b1.n);
         vadd(gW2, Dr.W2.g, Dr.W2.n); vadd(gb2, Dr.b2.g, Dr.b2.n);
@@ -415,7 +417,7 @@ int main(int argc, char **argv)
         /* ---- D_c step: fake0->0, fake1->1 */
         Act ac0 = mlp_fwd(&frame, &Dc, ag0.y, B); float lDc = k_bce_logits(ac0.y, dl, B, 0.0f, 0.5f) * 0.5f; mlp_bwd(&frame, &Dc, ag0.y, &ac0, dl, 1);
         float *hW1 = arena_floats(&frame, Dc.W1.n), *hb1 = arena_floats(&frame, Dc.b1.n), *hW2 = arena_floats(&frame, Dc.W2.n), *hb2 = arena_floats(&frame, Dc.b2.n);
-        memcpy(hW1, Dc.W1.g, Dc.W1.n * 4); memcpy(hb1, Dc.b1.g, Dc.b1.n * 4); memcpy(hW2, Dc.W2.g, Dc.W2.n * 4); memcpy(hb2, Dc.b2.g, Dc.b2.n * 4);
+        memcpy(hW1, Dc.W1.g, Dc.W1.n * sizeof(float)); memcpy(hb1, Dc.b1.g, Dc.b1.n * sizeof(float)); memcpy(hW2, Dc.W2.g, Dc.W2.n * sizeof(float)); memcpy(hb2, Dc.b2.g, Dc.b2.n * sizeof(float));
         Act ac1 = mlp_fwd(&frame, &Dc, ag1.y, B); lDc += k_bce_logits(ac1.y, dl, B, 1.0f, 0.5f) * 0.5f; mlp_bwd(&frame, &Dc, ag1.y, &ac1, dl, 1);
         vadd(Dc.W1.g, hW1, Dc.W1.n); vadd(Dc.b1.g, hb1, Dc.b1.n);
         vadd(Dc.W2.g, hW2, Dc.W2.n); vadd(Dc.b2.g, hb2, Dc.b2.n);
@@ -442,8 +444,8 @@ int main(int argc, char **argv)
             int n = 4096;
             float *ze = arena_floats(&frame, (size_t)n * c.Z); float *xe = arena_floats(&frame, (size_t)2 * n * c.X);
             float *xreal = arena_floats(&frame, (size_t)2 * n * c.X); sample_ring(&rng, xreal, 2 * n);
-            fill_gauss(&rng, ze, (size_t)n * c.Z, 1.0f); Act e0 = mlp_fwd(&frame, &G[0], ze, n); memcpy(xe, e0.y, (size_t)n * c.X * 4);
-            fill_gauss(&rng, ze, (size_t)n * c.Z, 1.0f); Act e1 = mlp_fwd(&frame, &G[1], ze, n); memcpy(xe + (size_t)n * c.X, e1.y, (size_t)n * c.X * 4);
+            fill_gauss(&rng, ze, (size_t)n * c.Z, 1.0f); Act e0 = mlp_fwd(&frame, &G[0], ze, n); memcpy(xe, e0.y, (size_t)n * c.X * sizeof(float));
+            fill_gauss(&rng, ze, (size_t)n * c.Z, 1.0f); Act e1 = mlp_fwd(&frame, &G[1], ze, n); memcpy(xe + (size_t)n * c.X, e1.y, (size_t)n * c.X * sizeof(float));
             ASSERT(k_all_finite(xe, (size_t)2 * n * c.X));
             for (int k = 0; k < 4; k++) { ASSERT(k_all_finite(PG[0][k].p, PG[0][k].n) && k_all_finite(PG[1][k].p, PG[1][k].n) && k_all_finite(PDr[k].p, PDr[k].n) && k_all_finite(PDc[k].p, PDc[k].n)); }
             int cov0, cov1, covU; float hq0, hq1, hqU;

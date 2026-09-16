@@ -5,7 +5,7 @@ same source:
 
 | target | toolchain | BLAS / LAPACK | output |
 |---|---|---|---|
-| `make native` | gcc | OpenBLAS (`sgemm_`, `ssyev_`, `sgeqrf_`, `sorgqr_`) | `build/d2g2gan.native` |
+| `make native` | gcc / clang | OpenBLAS on Linux, Accelerate on macOS (`sgemm_`, `ssyev_`, `sgeqrf_`, `sorgqr_`) | `build/d2g2gan.native` |
 | `make cosmo` | [cosmocc](https://github.com/jart/cosmopolitan) | netlib CLAPACK 3.2.1 (f2c'd reference BLAS + LAPACK, pure C, static) | `build/d2g2gan.com` — one Actually Portable Executable |
 
 Splash page with the results: https://ludoplex.github.io/d2g2gan/
@@ -42,9 +42,10 @@ Result (seed `0x9e3779b97f4a7c15`, `--hidden 128 --lr 1e-3 --steps 6000`):
   against f2c'd netlib BLAS.
 - **LAPACK does real work**: `sgeqrf_` + `sorgqr_` give orthogonal weight init; `ssyev_` gives the
   symmetric matrix square root inside the Fréchet (2-Wasserstein Gaussian) metric.
-- **Branchless hot paths**: leaky-ReLU forward/backward via `(float)(x > 0)` masks,
-  `sigmoid = 0.5*tanh(0.5x)+0.5`, `softplus = fmaxf(x,0) + log1pf(expf(-fabsf(x)))`, Adam, the
-  ring sampler and the coverage binning — no `if` inside an elementwise loop.
+- **No explicit branches in the authored kernels**: leaky-ReLU forward/backward via `(float)(x > 0)`
+  masks, `sigmoid = 0.5*tanh(0.5x)+0.5`, `softplus = fmaxf(x,0) + log1pf(expf(-fabsf(x)))`, Adam, the
+  ring sampler and the coverage binning — no `if` inside an elementwise loop. (The libm calls those
+  kernels bottom out in — `tanhf`, `expf`, `atan2f` — branch internally; the claim is about this source.)
 - **Dynamic arenas**: a 64-byte-aligned chunked bump allocator with mark/reset and chunk doubling.
   A persistent arena holds parameters + Adam state (62 KB at H=128); a frame arena is reset every
   step (peak 4.95 MB at H=128) and a postcondition asserts it is empty.

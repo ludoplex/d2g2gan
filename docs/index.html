@@ -131,7 +131,7 @@ footer{padding-top:2rem;display:flex;justify-content:space-between;gap:1rem;flex
     <div class="badges">
       <span class="badge ape">cosmocc + CLAPACK · 979 KB APE</span>
       <span class="badge nat">gcc + OpenBLAS</span>
-      <span class="badge">branchless hot paths</span>
+      <span class="badge">branch-free authored kernels</span>
       <span class="badge">arena allocators</span>
       <span class="badge">asserts always on</span>
     </div>
@@ -199,14 +199,14 @@ C = op(A)·op(B)   ⇔   Cᵀ = op(B)ᵀ·op(A)ᵀ
   <h2>Branchless. Arenas. Asserts.</h2>
   <div class="pillars">
     <div class="pillar">
-      <h3>No <code>if</code> inside an elementwise loop</h3>
+      <h3>No <code>if</code> in any authored elementwise loop</h3>
 <pre>m = (float)(x &gt; 0.0f);
 y = x * (m + 0.2f*(1.0f - m));        <i>leaky relu</i>
 sig = 0.5f*tanhf(0.5f*x) + 0.5f;      <i>stable σ</i>
 sp  = fmaxf(x,0) + log1pf(expf(-fabsf(x)));
 k   = rng_u64(r) &gt;&gt; 61;               <i>mode 0..7</i>
 ang += 6.2831853f * (float)(ang &lt; 0); <i>wrap</i></pre>
-      <p>Comparisons become masks, clamps become <code>fmaxf</code>/<code>fabsf</code>, the ring sampler and coverage binning pick modes arithmetically.</p>
+      <p>Comparisons become masks, clamps become <code>fmaxf</code>/<code>fabsf</code>, the ring sampler and coverage binning pick modes arithmetically. The libm calls underneath (<code>tanhf</code>, <code>expf</code>, <code>atan2f</code>) still branch internally — the claim is about this source.</p>
     </div>
     <div class="pillar">
       <h3>Two arenas, one reset per step</h3>

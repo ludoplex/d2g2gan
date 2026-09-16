@@ -10,7 +10,7 @@
 
 CC        ?= gcc
 COSMOCC   ?= cosmocc
-COSMOBIN  := $(dir $(shell command -v $(COSMOCC) 2>/dev/null))
+COSMOBIN  := $(dir $(shell command -v $(COSMOCC) 2>/dev/null || echo $(COSMOCC)))   # fall back to COSMOCC's own dir if not yet on PATH
 COSMOAR   ?= $(COSMOBIN)cosmoar
 COSMORANLIB ?= $(COSMOBIN)cosmoranlib
 CFLAGS    ?= -O2 -std=c11 -Wall -Wextra
@@ -27,8 +27,10 @@ all: native
 build:
 	mkdir -p build
 
+# Linux: OpenBLAS. macOS: Accelerate exports the same Fortran symbols (sgemm_/ssyev_/sgeqrf_/sorgqr_, 32-bit int).
+NATIVE_LIBS := $(if $(filter Darwin,$(shell uname -s)),-framework Accelerate,-lopenblas) -lm
 native: build
-	$(CC) $(CFLAGS) -o build/d2g2gan.native d2g2gan.c -lopenblas -lm
+	$(CC) $(CFLAGS) -o build/d2g2gan.native d2g2gan.c $(NATIVE_LIBS)
 
 # --- CLAPACK under cosmocc -------------------------------------------------------------------------
 # Every line below is a gotcha that was hit for real (2026-09-14, see README "Cosmopolitan notes"):
@@ -58,16 +60,23 @@ clapack: $(CLAPACK_DIR)/make.inc
 	$(COSMORANLIB) $(CLAPACK_DIR)/lapack_COSMO.a $(CLAPACK_DIR)/blas_COSMO.a
 	@ls -la $(CLAPACK_LIBS)
 
+# No prerequisites on purpose: once the archive exists it is never rebuilt by `make cosmo`.
+# After changing the CLAPACK flags above, `rm -rf third_party` (CI's cache key hashes this Makefile, so CI rebuilds).
 $(CLAPACK_DIR)/lapack_COSMO.a:
 	$(MAKE) clapack
 
 cosmo: build $(CLAPACK_DIR)/lapack_COSMO.a
 	$(COSMOCC) $(CFLAGS) -DCLAPACK_F2C_WRAP -o build/d2g2gan.com d2g2gan.c $(CLAPACK_LIBS) -lm
 
+# The binary's own exit status is the test: an ASSERT abort() must fail the target.
+# No pipe into tail (dash has no pipefail): run to a file, keep rc, then show the tail.
 test:
-	@set -e; ran=0; \
+	@set -e; ran=0; mkdir -p build; \
 	for b in build/d2g2gan.native build/d2g2gan.com; do \
-	  if [ -x $$b ]; then echo "== $$b"; OPENBLAS_NUM_THREADS=1 $$b --hidden 128 --lr 1e-3 --steps $(STEPS) --eval-every $(STEPS) | tail -3; ran=1; fi; \
+	  if [ -x $$b ]; then echo "== $$b"; rc=0; \
+	    OPENBLAS_NUM_THREADS=1 $$b --hidden 128 --lr 1e-3 --steps $(STEPS) --eval-every $(STEPS) > build/test.out 2>&1 || rc=$$?; \
+	    tail -3 build/test.out; \
+	    [ $$rc -eq 0 ] || { echo "FAIL: $$b exited $$rc"; exit $$rc; }; ran=1; fi; \
 	done; \
 	[ $$ran -eq 1 ] || { echo "nothing built: run make native and/or make cosmo"; exit 1; }
 
